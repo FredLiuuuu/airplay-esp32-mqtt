@@ -1,0 +1,81 @@
+name: Build (MQTT fork)
+
+# Builds the generic ESP32-S3 MQTT image of this fork.
+#
+# Upstream's ci.yml / beta.yml / release.yml / docs.yml are removed in this
+# fork: they publish upstream's betas, releases and documentation site.
+# Upstream's reusable build.yml and targets.json are kept unchanged so merges
+# from upstream stay simple.
+#
+# On a tag like v0.3.0-mqtt.5 the images are also attached to a GitHub release
+# (as a draft, to be checked and published by hand).
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*-mqtt.*"]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      NAME: esp32s3-generic-mqtt
+      DEFAULTS: config/sdkconfig.defaults;config/sdkconfig.defaults.esp32s3;config/sdkconfig.defaults.esp32s3-generic-mqtt
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Build
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32s3
+          command: >
+            idf.py -DSDKCONFIG_DEFAULTS="${{ env.DEFAULTS }}" build &&
+            cd build &&
+            esptool.py --chip esp32s3 merge_bin --format raw -o merged-firmware.bin $(cat flash_args)
+
+      - name: Collect images
+        run: |
+          set -euo pipefail
+          ver="$(cat version.txt)"
+          mkdir -p out
+          cp build/airplay2-receiver.bin "out/airplay-esp32-mqtt-${ver}-${NAME}-ota.bin"
+          cp build/merged-firmware.bin "out/airplay-esp32-mqtt-${ver}-${NAME}-full.bin"
+          cp build/airplay2-receiver.elf "out/airplay-esp32-mqtt-${ver}-${NAME}.elf"
+          (cd out && sha256sum * > SHA256SUMS)
+          cat out/SHA256SUMS
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: firmware-${{ env.NAME }}
+          path: out/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: firmware-esp32s3-generic-mqtt
+          path: out
+      - name: Draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" out/* \
+            --repo "${GITHUB_REPOSITORY}" --draft --title "${GITHUB_REF_NAME}" \
+            --notes "Built from ${GITHUB_SHA}. Source: this tag (GPL-3.0-or-later)."

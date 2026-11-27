@@ -30,6 +30,7 @@ firmware binaries published in GitHub releases.
 | ESP-IDF (incl. Wi-Fi, Bluetooth and PHY libraries) | Apache-2.0 | Yes |
 | `espressif/esp_audio_codec` (ALAC and AAC decoders, precompiled) | Espressif Modified MIT | **No** — see below |
 | `espressif/mdns` | Apache-2.0 | Yes |
+| `espressif/mqtt` (ESP-MQTT, used by the MQTT now-playing feature of this fork) | Apache-2.0 | Yes |
 | `espressif/libsodium` | ISC | Yes |
 | `espressif/tinyusb` | MIT | Yes |
 | `espressif/usb_device_uac` | Apache-2.0 | Yes |
@@ -74,6 +75,10 @@ This project's protocol implementation was informed by the following work. They
 are acknowledged as references and documentation:
 
 - [Shairport Sync](https://github.com/mikebrady/shairport-sync) — MIT
+  (airplay-esp32-mqtt: the AirPlay 2 event-channel key labels and
+  `sendMediaRemoteCommand` message shapes in `main/event_ctrl.c` and
+  `main/hap/hap_crypto.c` follow its development branch; see the notes at the
+  top of `main/event_ctrl.c`)
 - [openairplay/airplay2-receiver](https://github.com/openairplay/airplay2-receiver)
   — no license stated by its authors
 
