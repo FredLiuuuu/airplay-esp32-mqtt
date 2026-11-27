@@ -12,6 +12,13 @@ discovery, cover art and remote control back to the sender.
 - **Real AirPlay 2 multi-room on a microcontroller.** Group it with HomePods
   in the Home app or Control Center and it plays in sync. Upstream does the
   AirPlay 2 work; this fork keeps all of it.
+- **A room speaker in Apple Home, so Siri includes it.** Add it in the Home
+  app and assign it to a room, like a HomePod. Siri on a HomePod or home hub
+  then includes it in "play music everywhere" and "play music in the
+  <room>". This is upstream's HomeKit pairing
+  ([airplay-esp32#228](https://github.com/rbouteiller/airplay-esp32/pull/228)
+  by [@emlynmac](https://github.com/emlynmac)), ported onto this fork. See
+  [Apple Home](#apple-home) for the setup and its limits.
 - **Appears in Home Assistant automatically.** With MQTT discovery you get one
   device, with title, artist, album, play state, position, duration and cover
   art, with no YAML to write. This also works when the receiver is grouped and
@@ -44,6 +51,7 @@ scripts or another integration.
 | Home Assistant auto-discovery | Yes: sensors, image, buttons, volume number | Not built in | Yes: sensors and binary sensors | Not built in | Varies; some have HA integrations |
 | Cover art in HA | Yes, MQTT `image` entity (served from PSRAM) | Not built in (used for displays) | Published as binary on MQTT; not part of discovery | Not built in | Varies |
 | Remote control of the AirPlay 2 sender | Yes, event channel | In `staging` (PR #226), not yet released | Yes (MQTT `remote` topic) | AirPlay 1 only | Varies |
+| Add to Apple Home as a room speaker | Yes (upstream #228, ported) | In `staging` (PR #228), not yet released | Yes (see its `ADDINGTOHOME.md`) | No | Usually yes |
 | Crash log / auto-rollback | Yes | Not built in | n/a (Linux service) | Not built in | Closed firmware |
 | Open source | GPL-3.0-or-later | GPL-3.0-or-later | Yes (see its LICENSES file) | Yes (see its repo for licenses) | Usually closed |
 
@@ -78,6 +86,7 @@ fork does both on the microcontroller.
 | Command topics | Play/pause/next/previous and volume from MQTT (and HA buttons/slider). | `main/mqtt_nowplaying.c` |
 | Cover art | Artwork received over AirPlay is kept in **PSRAM** (up to 256 KB) and served over HTTP; HA shows it through an MQTT `image` entity. Also works while the receiver is in a multi-room group. | `main/mqtt_nowplaying.c`, `main/rtsp/rtsp_handlers.c`, `main/network/mdns_airplay.c` |
 | Remote control over the AirPlay 2 event channel | Sends MediaRemote commands to the sender, so play/pause/next work even when the sender gives no DACP-ID (normal with AirPlay 2). | `main/event_ctrl.c`, `main/hap/*` |
+| Apple Home pairing | HomeKit pair-setup/verify, a pairing store in NVS, `/pair-add`, `/pair-remove`, `/pair-list` and `/configure`, so the Home app can add the speaker to a room. Ported from upstream [#228](https://github.com/rbouteiller/airplay-esp32/pull/228) (by @emlynmac). | `main/hap/*`, `main/network/mdns_airplay.c`, `main/rtsp/rtsp_handlers.c` |
 | Crash log | The last ~3 KB of log text and a panic record (reason, PC, task names, backtrace of both cores) survive a reset in RTC RAM. | `main/crash_log.c` |
 | Boot guard | After 3 consecutive crash boots, switches back to the other OTA slot (the firmware it was updated from). | `main/boot_guard.c` |
 | Generic board config | `config/sdkconfig.defaults.esp32s3-generic-mqtt`: DIO flash mode and SNTP via DHCP. | `config/` |
@@ -90,6 +99,49 @@ Upstream has since merged an implementation of the same feature:
 the same key derivation and the same `POST /command` message. **Once a release
 contains #226, this fork will drop `event_ctrl.c` and its `hap/*` changes and
 call the upstream implementation from the MQTT command handler instead.**
+
+## Apple Home
+
+Ported from upstream
+[rbouteiller/airplay-esp32#228](https://github.com/rbouteiller/airplay-esp32/pull/228)
+by [@emlynmac](https://github.com/emlynmac) (merged into upstream `staging`,
+not yet in an upstream release). Upstream's full guide:
+[docs/features/homekit.md](docs/features/homekit.md).
+
+**Setup** (AirPlay 2 mode, the default):
+
+1. Home app → **Home Settings → Speakers & TV**: set **Allow Speaker & TV
+   Access** to **Anyone on the Same Network** (or **Everyone**), and turn
+   **Require Password** off. The speaker can't be added otherwise. This is a
+   home-wide setting: anyone on your network can then stream to your speakers.
+2. **+ → Add Accessory → More options…**, pick the speaker, choose a room.
+   No setup code is asked for.
+
+**Tested on hardware** (one ESP32-S3 board, 2026-11-27): added to a room that
+also holds two HomePods. Siri on an Apple home hub played to it with "play
+music in the <room>" and with "play music everywhere", in sync with the
+HomePods. MQTT now-playing kept working.
+
+**Known limits:**
+
+- **"Controls not available" on the Home tile.** The Home app shows no track,
+  artwork, play/skip or volume for the speaker. That needs Apple's MediaRemote
+  protocol, which no open AirPlay receiver implements (Shairport Sync has the
+  same limit). Siri, the AirPlay picker, Control Center and Home Assistant
+  still control playback.
+- **Group membership seen from Home Assistant.** When Siri starts playback,
+  the home hub's AirPlay output list (as read by pyatv-based integrations,
+  e.g. a `group_members` attribute) did not include this speaker, even though
+  it was playing. Automations that track "is the speaker in the hub's group"
+  from that list will miss Siri-started sessions. The speaker's own MQTT play
+  state is reliable.
+- The model advertised over mDNS changes from `AudioAccessory5,1` (HomePod
+  mini) to `airplay-esp32`, as upstream does; the Home app doesn't list the
+  speaker otherwise. The AirPlay picker then shows a generic speaker icon.
+- No speaker password; access control is advertised, not enforced; pairing
+  uses the shared AirPlay code. Same as upstream and Shairport Sync.
+- `GET /api/homekit` shows the stored pairings; `POST /api/homekit/reset`
+  forgets them (remove the speaker in the Home app too).
 
 ## Home Assistant
 
@@ -255,6 +307,8 @@ image and the ELF as artifacts.
 ## Relationship to upstream
 
 The plan is to keep this fork thin:
+- Apple Home pairing is upstream #228, ported as-is (its `main/` and `tests/`
+  changes). It will come in with the next upstream release.
 - The event-channel remote control will be replaced by upstream #226 once it is
   released (see above).
 - The MQTT/Home Assistant part may be proposed upstream as an opt-in feature.
