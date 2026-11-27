@@ -14,6 +14,7 @@
 #include "rtsp_server.h"
 #include "wifi.h"
 #include "settings.h"
+#include "mqtt_nowplaying.h"
 
 static const char *TAG = "mdns_airplay";
 
@@ -37,11 +38,9 @@ static const char *TAG = "mdns_airplay";
 // When artwork is disabled, drop "1" so senders do not transmit cover art
 // (which can stall the audio pipeline and cause drop-outs on realtime
 // streams) while still sending text and progress metadata.
-#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
-#define AIRPLAY_METADATA_TYPES "0,1,2"
-#else
-#define AIRPLAY_METADATA_TYPES "0,2"
-#endif
+// Runtime switch (MQTT now-playing settings, read at boot).
+#define AIRPLAY_METADATA_TYPES \
+  (mqtt_nowplaying_artwork_enabled() ? "0,1,2" : "0,2")
 
 // Model identifier - AudioAccessory for speaker appearance
 // AppleTV3,2 = Apple TV, AudioAccessory5,1 = HomePod mini (speaker)

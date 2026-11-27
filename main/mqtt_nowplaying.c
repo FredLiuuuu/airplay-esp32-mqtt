@@ -19,6 +19,7 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif_sntp.h"
@@ -45,10 +46,12 @@ static const char *TAG = "mqtt_np";
 #define NP_BASE_MAX      48
 #define NP_PREFIX_MAX    32
 #define NP_TOPIC_MAX     128
+#define NP_ARTWORK_MAX   ((size_t)256 * 1024)
 #define NP_PROGRESS_SECS 5 // republish position this often while playing
 
 typedef struct {
   bool enabled;
+  bool artwork;
   char host[NP_HOST_MAX];
   uint16_t port;
   char user[NP_USER_MAX];
@@ -73,11 +76,17 @@ typedef struct {
   uint32_t duration;
   uint32_t position;        // seconds at position_at_us
   int64_t position_at_us;   // esp_timer time when position was set
+  uint32_t artwork_version; // bumps each time a new image arrives
 } np_state_t;
 
 static np_config_t s_cfg;
+static bool s_artwork_boot; // artwork setting as read at boot (mDNS)
 static np_state_t s_np;
 static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_art_lock;
+static uint8_t *s_art_buf;
+static size_t s_art_len;
+static char s_art_type[24];
 static volatile bool s_dirty;
 static volatile playback_source_t s_last_source = PLAYBACK_SOURCE_NONE;
 static volatile bool s_restart;
@@ -93,6 +102,7 @@ static char s_dev_id[32]; // "airplay_esp32_<12 hex digits of the STA MAC>"
 static void cfg_defaults(np_config_t *c) {
   memset(c, 0, sizeof(*c));
   c->enabled = false;
+  c->artwork = true;
   c->port = 1883;
   uint8_t mac[6] = {0};
   esp_read_mac(mac, ESP_MAC_WIFI_STA);
@@ -119,6 +129,9 @@ static void cfg_load(np_config_t *c) {
   if (nvs_get_u8(h, "en", &u8) == ESP_OK) {
     c->enabled = u8 != 0;
   }
+  if (nvs_get_u8(h, "art", &u8) == ESP_OK) {
+    c->artwork = u8 != 0;
+  }
   uint16_t u16;
   if (nvs_get_u16(h, "port", &u16) == ESP_OK && u16 != 0) {
     c->port = u16;
@@ -138,6 +151,9 @@ static esp_err_t cfg_save(const np_config_t *c) {
     return err;
   }
   err = nvs_set_u8(h, "en", c->enabled ? 1 : 0);
+  if (err == ESP_OK) {
+    err = nvs_set_u8(h, "art", c->artwork ? 1 : 0);
+  }
   if (err == ESP_OK) {
     err = nvs_set_u16(h, "port", c->port);
   }
@@ -161,6 +177,18 @@ static esp_err_t cfg_save(const np_config_t *c) {
   }
   nvs_close(h);
   return err;
+}
+
+bool mqtt_nowplaying_artwork_enabled(void) {
+#ifdef CONFIG_ENABLE_AIRPLAY_ARTWORK
+  return true; // upstream compile-time switch (e.g. display builds)
+#else
+  return s_artwork_boot;
+#endif
+}
+
+bool mqtt_nowplaying_artwork_advertise(void) {
+  return s_artwork_boot;
 }
 
 // ---------------------------------------------------------------------------
@@ -208,9 +236,16 @@ static void on_rtsp_event(playback_source_t source, playback_event_t event,
     freeze_position(&s_np);
     s_np.state = NP_STATE_PAUSED;
     break;
-  case PLAYBACK_EVENT_DISCONNECTED:
+  case PLAYBACK_EVENT_DISCONNECTED: {
+    uint32_t art = s_np.artwork_version;
     memset(&s_np, 0, sizeof(s_np));
+    s_np.artwork_version = art + 1; // republish (now empty) artwork_url
+    if (s_art_lock && xSemaphoreTake(s_art_lock, pdMS_TO_TICKS(200))) {
+      s_art_len = 0;
+      xSemaphoreGive(s_art_lock);
+    }
     break;
+  }
   case PLAYBACK_EVENT_METADATA:
     if (data) {
       const playback_metadata_t *m = &data->metadata;
@@ -239,6 +274,38 @@ static void on_rtsp_event(playback_source_t source, playback_event_t event,
   s_dirty = true;
 }
 
+void mqtt_nowplaying_set_artwork(const void *data, size_t len,
+                                 const char *content_type) {
+  if (!s_art_lock || !data || len == 0 || len > NP_ARTWORK_MAX) {
+    return;
+  }
+  // Never block the RTSP task for long: drop the image if the HTTP side is
+  // busy sending the previous one.
+  if (!xSemaphoreTake(s_art_lock, pdMS_TO_TICKS(200))) {
+    ESP_LOGW(TAG, "artwork busy, dropped %u bytes", (unsigned)len);
+    return;
+  }
+  if (!s_art_buf) {
+    s_art_buf = heap_caps_malloc(NP_ARTWORK_MAX, MALLOC_CAP_SPIRAM);
+  }
+  if (s_art_buf) {
+    memcpy(s_art_buf, data, len);
+    s_art_len = len;
+    const char *t = "image/jpeg";
+    if (content_type && strstr(content_type, "image/png")) {
+      t = "image/png";
+    }
+    strlcpy(s_art_type, t, sizeof(s_art_type));
+  }
+  xSemaphoreGive(s_art_lock);
+  if (s_art_buf) {
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_np.artwork_version++;
+    xSemaphoreGive(s_lock);
+    s_dirty = true;
+  }
+}
+
 static const char *state_str(np_play_state_t s) {
   switch (s) {
   case NP_STATE_PLAYING:
@@ -256,6 +323,12 @@ static char *build_state_json(void) {
   xSemaphoreTake(s_lock, portMAX_DELAY);
   st = s_np;
   xSemaphoreGive(s_lock);
+
+  bool have_art = false;
+  if (xSemaphoreTake(s_art_lock, pdMS_TO_TICKS(50))) {
+    have_art = s_art_len > 0;
+    xSemaphoreGive(s_art_lock);
+  }
 
   cJSON *j = cJSON_CreateObject();
   cJSON_AddStringToObject(j, "state", state_str(st.state));
@@ -308,6 +381,15 @@ static char *build_state_json(void) {
   cJSON_AddBoolToObject(j, "dacp", dacp_is_active());
   // Diagnostic: did the sender send DACP-ID/Active-Remote at all.
   cJSON_AddBoolToObject(j, "dacp_id_seen", dacp_has_id());
+  char ip[20] = {0};
+  if (have_art && wifi_get_ip_str(ip, sizeof(ip)) == ESP_OK && ip[0]) {
+    char url[80];
+    snprintf(url, sizeof(url), "http://%s/api/nowplaying/artwork?v=%" PRIu32,
+             ip, st.artwork_version);
+    cJSON_AddStringToObject(j, "artwork", url);
+  } else {
+    cJSON_AddNullToObject(j, "artwork");
+  }
   char *out = cJSON_PrintUnformatted(j);
   cJSON_Delete(j);
   return out;
@@ -440,6 +522,15 @@ static void publish_discovery(void) {
     cJSON_AddStringToObject(c, "unit_of_measurement", "%");
     cJSON_AddStringToObject(c, "icon", "mdi:volume-high");
     discovery("number", "volume", "Volume", c);
+  }
+
+  // Artwork: HA downloads the image from the URL in artwork_url.
+  {
+    char ut[NP_TOPIC_MAX];
+    topic(ut, sizeof(ut), "artwork_url");
+    c = cJSON_CreateObject();
+    cJSON_AddStringToObject(c, "url_topic", ut);
+    discovery("image", "artwork", "Artwork", c);
   }
 
   discovery("button", "play_pause", "Play/Pause",
@@ -593,6 +684,7 @@ static void client_start(void) {
 
 static void worker_task(void *arg) {
   (void)arg;
+  uint32_t last_art = UINT32_MAX;
   int last_vol = -1;
   int64_t last_pub = 0;
   for (;;) {
@@ -600,6 +692,7 @@ static void worker_task(void *arg) {
     if (s_restart) {
       s_restart = false;
       client_start();
+      last_art = UINT32_MAX;
     }
     if (!s_mqtt_connected) {
       continue;
@@ -617,6 +710,29 @@ static void worker_task(void *arg) {
     char *js = build_state_json();
     if (js) {
       publish("state", js, true);
+      cJSON *j = cJSON_Parse(js);
+      uint32_t art = s_np.artwork_version;
+      cJSON *a = j ? cJSON_GetObjectItem(j, "artwork") : NULL;
+      if (art != last_art) {
+        // Never publish "" (HA's mqtt image rejects it). With no artwork,
+        // point at the same endpoint with a new ?v=; it serves a 1x1
+        // transparent PNG, so the image entity really clears. The state
+        // JSON `artwork` stays null for that case.
+        if (a && cJSON_IsString(a)) {
+          publish("artwork_url", a->valuestring, true);
+          last_art = art;
+        } else {
+          char ip[20] = {0};
+          if (wifi_get_ip_str(ip, sizeof(ip)) == ESP_OK && ip[0]) {
+            char url[80];
+            snprintf(url, sizeof(url),
+                     "http://%s/api/nowplaying/artwork?v=%" PRIu32, ip, art);
+            publish("artwork_url", url, true);
+            last_art = art;
+          } // else retry on a later pass once the IP is known
+        }
+      }
+      cJSON_Delete(j);
       free(js);
     }
   }
@@ -645,6 +761,8 @@ static esp_err_t mqtt_get_handler(httpd_req_t *req) {
   cJSON_AddBoolToObject(j, "has_password", s_cfg.pass[0] != 0);
   cJSON_AddStringToObject(j, "base_topic", s_cfg.base);
   cJSON_AddStringToObject(j, "discovery_prefix", s_cfg.prefix);
+  cJSON_AddBoolToObject(j, "artwork", s_cfg.artwork);
+  cJSON_AddBoolToObject(j, "artwork_active", s_artwork_boot);
   cJSON_AddBoolToObject(j, "connected", s_mqtt_connected);
   return send_json(req, j);
 }
@@ -658,7 +776,7 @@ static void copy_json_str(cJSON *j, const char *key, char *out, size_t len) {
 
 // POST /api/mqtt  {"enabled":true,"host":"mqtt.example.lan","port":1883,
 //                  "username":"...","password":"...","base_topic":"...",
-//                  "discovery_prefix":"homeassistant"}
+//                  "discovery_prefix":"homeassistant","artwork":true}
 // Omitted keys keep their value. "password" is write-only.
 static esp_err_t mqtt_post_handler(httpd_req_t *req) {
   char body[512];
@@ -686,6 +804,10 @@ static esp_err_t mqtt_post_handler(httpd_req_t *req) {
   if (v && cJSON_IsBool(v)) {
     c.enabled = cJSON_IsTrue(v);
   }
+  v = cJSON_GetObjectItem(j, "artwork");
+  if (v && cJSON_IsBool(v)) {
+    c.artwork = cJSON_IsTrue(v);
+  }
   v = cJSON_GetObjectItem(j, "port");
   if (v && cJSON_IsNumber(v) && v->valueint > 0 && v->valueint < 65536) {
     c.port = (uint16_t)v->valueint;
@@ -707,6 +829,8 @@ static esp_err_t mqtt_post_handler(httpd_req_t *req) {
     s_cfg = c;
     s_restart = true; // worker task reconnects with the new settings
     cJSON_AddBoolToObject(r, "success", true);
+    cJSON_AddBoolToObject(r, "restart_needed_for_artwork",
+                          (c.enabled && c.artwork) != s_artwork_boot);
   } else {
     cJSON_AddBoolToObject(r, "success", false);
     cJSON_AddStringToObject(r, "error", esp_err_to_name(err));
@@ -721,6 +845,33 @@ static esp_err_t nowplaying_handler(httpd_req_t *req) {
   httpd_resp_send(req, js ? js : "{}", HTTPD_RESP_USE_STRLEN);
   free(js);
   return ESP_OK;
+}
+
+// 1x1 transparent PNG served when no artwork is held.
+static const uint8_t k_blank_png[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+    0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x60, 0x00, 0x02, 0x00,
+    0x00, 0x05, 0x00, 0x01, 0x7a, 0x5e, 0xab, 0x3f, 0x00, 0x00, 0x00, 0x00,
+    0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82};
+
+static esp_err_t artwork_handler(httpd_req_t *req) {
+  if (!xSemaphoreTake(s_art_lock, pdMS_TO_TICKS(1000))) {
+    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "busy");
+    return ESP_FAIL;
+  }
+  if (s_art_len == 0 || !s_art_buf) {
+    xSemaphoreGive(s_art_lock);
+    httpd_resp_set_type(req, "image/png");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    return httpd_resp_send(req, (const char *)k_blank_png, sizeof(k_blank_png));
+  }
+  httpd_resp_set_type(req, s_art_type);
+  httpd_resp_set_hdr(req, "Cache-Control", "max-age=3600");
+  esp_err_t err = httpd_resp_send(req, (const char *)s_art_buf, s_art_len);
+  xSemaphoreGive(s_art_lock);
+  return err;
 }
 
 // Minimal built-in settings page (the SPIFFS web UI has no MQTT form).
@@ -741,14 +892,16 @@ static const char MQTT_PAGE[] =
     "<input type=password id=password placeholder='(unchanged)'>"
     "<label>Base topic</label><input type=text id=base_topic>"
     "<label>Discovery prefix</label><input type=text id=discovery_prefix>"
+    "<label><input type=checkbox id=artwork> Receive cover art "
+    "(restart needed)</label>"
     "<button onclick='save()'>Save</button> <span id=msg></span>"
     "<p><a href='/api/nowplaying'>/api/nowplaying</a></p><script>"
     "const F=['host','port','username','base_topic','discovery_prefix'];"
     "fetch('/api/mqtt').then(r=>r.json()).then(c=>{F.forEach(k=>"
     "document.getElementById(k).value=c[k]);enabled.checked=c.enabled;"
-    "pw.textContent=c.has_password?'(set)':'(none)';"
+    "artwork.checked=c.artwork;pw.textContent=c.has_password?'(set)':'(none)';"
     "msg.textContent=c.connected?'connected':'not connected'});"
-    "function save(){const b={enabled:enabled.checked};"
+    "function save(){const b={enabled:enabled.checked,artwork:artwork.checked};"
     "F.forEach(k=>b[k]=document.getElementById(k).value);b.port=+b.port;"
     "if(password.value)b.password=password.value;"
     "fetch('/api/mqtt',{method:'POST',headers:{'Content-Type':"
@@ -772,9 +925,13 @@ void mqtt_nowplaying_register_http(httpd_handle_t server) {
   httpd_uri_t u3 = {.uri = "/api/nowplaying",
                     .method = HTTP_GET,
                     .handler = nowplaying_handler};
+  httpd_uri_t u4 = {.uri = "/api/nowplaying/artwork",
+                    .method = HTTP_GET,
+                    .handler = artwork_handler};
   httpd_register_uri_handler(server, &u1);
   httpd_register_uri_handler(server, &u2);
   httpd_register_uri_handler(server, &u3);
+  httpd_register_uri_handler(server, &u4);
   httpd_uri_t u5 = {
       .uri = "/mqtt", .method = HTTP_GET, .handler = mqtt_page_handler};
   httpd_register_uri_handler(server, &u5);
@@ -789,7 +946,8 @@ esp_err_t mqtt_nowplaying_init(void) {
     return ESP_OK;
   }
   s_lock = xSemaphoreCreateMutex();
-  if (!s_lock) {
+  s_art_lock = xSemaphoreCreateMutex();
+  if (!s_lock || !s_art_lock) {
     return ESP_ERR_NO_MEM;
   }
   uint8_t mac[6] = {0};
@@ -797,9 +955,11 @@ esp_err_t mqtt_nowplaying_init(void) {
   snprintf(s_dev_id, sizeof(s_dev_id), "airplay_esp32_%02x%02x%02x%02x%02x%02x",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   cfg_load(&s_cfg);
+  s_artwork_boot = s_cfg.enabled && s_cfg.artwork;
   playback_events_register(on_rtsp_event, NULL);
-  ESP_LOGI(TAG, "init: mqtt %s, host '%s', base '%s'",
-           s_cfg.enabled ? "on" : "off", s_cfg.host, s_cfg.base);
+  ESP_LOGI(TAG, "init: mqtt %s, host '%s', base '%s', artwork %s",
+           s_cfg.enabled ? "on" : "off", s_cfg.host, s_cfg.base,
+           s_artwork_boot ? "on" : "off");
   return ESP_OK;
 }
 
