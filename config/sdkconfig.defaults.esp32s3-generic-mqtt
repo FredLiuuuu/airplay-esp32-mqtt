@@ -1,0 +1,15 @@
+# Generic ESP32-S3 board (16 MB flash, octal PSRAM) with the MQTT now-playing
+# features. Layered after sdkconfig.defaults + sdkconfig.defaults.esp32s3.
+#
+# Flash mode: many low-cost ESP32-S3 AirPlay receiver boards ship with a
+# bootloader that runs the flash in DIO. Upstream v0.3.0 defaults to QIO, which
+# makes the app set the flash chip's QE bit. If you only ever flash over the web
+# OTA page (bootloader unchanged), keep DIO here so app and bootloader agree.
+# Boards flashed fully over serial with this project's bootloader can use QIO.
+CONFIG_ESPTOOLPY_FLASHMODE_DIO=y
+# CONFIG_ESPTOOLPY_FLASHMODE_QIO is not set
+
+# SNTP wall clock for now-playing timestamps (position_ts /
+# position_updated_at): DHCP-offered NTP server first, then pool.ntp.org.
+CONFIG_LWIP_SNTP_MAX_SERVERS=2
+CONFIG_LWIP_DHCP_GET_NTP_SRV=y
