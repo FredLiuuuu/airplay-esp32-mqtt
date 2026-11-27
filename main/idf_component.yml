@@ -22,3 +22,8 @@ dependencies:
     version: "^2.0.0"
     rules:
       - if: "idf_version >= 6.0"
+  # MQTT now-playing (airplay-esp32-mqtt): esp-mqtt left ESP-IDF core in 6.0.
+  espressif/mqtt:
+    version: "^1.0.0"
+    rules:
+      - if: "idf_version >= 6.0"

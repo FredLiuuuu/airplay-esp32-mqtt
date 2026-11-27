@@ -85,6 +85,10 @@ void dacp_send_volume(float volume_percent);
  */
 bool dacp_is_active(void);
 
+/** True once the sender sent a DACP-ID header (session may still be
+ * unusable if its _dacp._tcp service is not found). */
+bool dacp_has_id(void);
+
 /**
  * Probe mDNS to check if the client's DACP service is still advertised.
  * Used in AirPlay v1 mode to differentiate pause from genuine disconnect.

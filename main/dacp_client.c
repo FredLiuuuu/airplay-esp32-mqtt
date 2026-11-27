@@ -330,6 +330,10 @@ void dacp_send_volume(float volume_percent) {
   send_dacp_request(path);
 }
 
+bool dacp_has_id(void) { // DACP-ID received this session
+  return s_initialized && s_dacp_id[0] != '\0';
+}
+
 bool dacp_is_active(void) {
   if (!s_initialized) {
     return false;
