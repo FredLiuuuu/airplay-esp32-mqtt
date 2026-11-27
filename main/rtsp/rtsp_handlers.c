@@ -39,6 +39,7 @@
 
 #include "playback_events.h"
 #include "dacp_client.h"
+#include "event_ctrl.h"
 
 static const char *TAG = "rtsp_handlers";
 
@@ -94,7 +95,7 @@ bool rtsp_codec_configure(int64_t type_id, audio_format_t *fmt,
 }
 
 // Event port task state
-#define EVENT_STACK_SIZE 3072
+#define EVENT_STACK_SIZE 6144 // Decrypt/log on the event channel
 
 // Default playout latency for realtime (type 96) streams when SETUP does not
 // carry a usable latencyMin: 11025 samples = 250 ms at 44.1 kHz.  This is the
@@ -249,10 +250,12 @@ static void event_port_task(void *pvParameters) {
       }
 
       if (event_client_socket >= 0) {
+        event_ctrl_detach();
         close(event_client_socket);
       }
       event_client_socket = client;
       ESP_LOGI(TAG, "Event client connected");
+      event_ctrl_attach(client);
       playback_events_emit(PLAYBACK_SOURCE_AIRPLAY, PLAYBACK_EVENT_CONNECTED,
                            NULL);
 
@@ -272,9 +275,12 @@ static void event_port_task(void *pvParameters) {
           break;
         }
         if (ret > 0 && FD_ISSET(event_client_socket, &cfds)) {
-          char buf[16];
-          ssize_t n = recv(event_client_socket, buf, sizeof(buf), MSG_PEEK);
-          if (n <= 0) {
+          // Really read (and decrypt/log) what the sender sends.
+          // A MSG_PEEK check left replies in the buffer, so select() would
+          // return at once forever once the sender had sent anything.
+          if (!event_ctrl_on_readable(event_client_socket)) {
+            ESP_LOGI(TAG, "Event client disconnected");
+            event_ctrl_detach();
             close(event_client_socket);
             event_client_socket = -1;
             break;
@@ -285,6 +291,7 @@ static void event_port_task(void *pvParameters) {
   }
 
   if (event_client_socket >= 0) {
+    event_ctrl_detach();
     close(event_client_socket);
     event_client_socket = -1;
   }
@@ -1208,6 +1215,19 @@ static void handle_setup(int socket, rtsp_conn_t *conn,
         audio_receiver_set_encryption(&audio_encrypt);
       }
     }
+  }
+
+  // Hand the event-channel keys and groupUUID to event_ctrl before
+  // the sender can connect to the event port.
+  if (!is_v1_transport_setup && !request_has_streams && conn->hap_session &&
+      conn->hap_session->events_keys_valid) {
+    char gid[40] = "";
+    if (body && body_len > 8) {
+      bplist_find_string((const uint8_t *)body, body_len, "groupUUID", gid,
+                         sizeof(gid));
+    }
+    event_ctrl_set_session(conn->hap_session->events_write_key,
+                           conn->hap_session->events_read_key, gid);
   }
 
   // Create event port if needed

@@ -50,6 +50,7 @@ set( SRC_FILES
     "playback_events.c"
     "dacp_client.c"
     "mqtt_nowplaying.c"
+    "event_ctrl.c"
 )
 
 # Select audio output implementation at compile time. audio_output_common.c

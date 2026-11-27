@@ -31,6 +31,7 @@
 #include "nvs.h"
 
 #include "dacp_client.h"
+#include "event_ctrl.h"
 #include "playback_control.h"
 #include "playback_events.h"
 #include "settings.h"
@@ -381,6 +382,10 @@ static char *build_state_json(void) {
   cJSON_AddBoolToObject(j, "dacp", dacp_is_active());
   // Diagnostic: did the sender send DACP-ID/Active-Remote at all.
   cJSON_AddBoolToObject(j, "dacp_id_seen", dacp_has_id());
+  // True when the box can control its sender over the AirPlay 2
+  // event channel (no DACP needed). Commands on cmd then reach the sender.
+  cJSON_AddBoolToObject(j, "event_ctrl",
+                        !dacp_is_active() && event_ctrl_available());
   char ip[20] = {0};
   if (have_art && wifi_get_ip_str(ip, sizeof(ip)) == ESP_OK && ip[0]) {
     char url[80];
@@ -557,8 +562,42 @@ static void handle_command(const char *t, int tlen, const char *d, int dlen) {
   }
   memcpy(payload, d, dlen);
 
+  if (strcmp(suffix, "cmd/exp_event") == 0) {
+    // Test trigger: "<0-5>" tries each message form until one is
+    // answered 2xx; "<0-5>/<form 0-2>" sends just that form.
+    char *slash = strchr(payload, '/');
+    int c = atoi(payload);
+    bool ok = slash ? event_ctrl_queue_form(c, atoi(slash + 1))
+                    : event_ctrl_queue(c, true);
+    ESP_LOGI(TAG, "exp_event %s: %s", payload, ok ? "queued" : "refused");
+    return;
+  }
+
   if (strcmp(suffix, "cmd") == 0) {
     ESP_LOGI(TAG, "command: %s", payload);
+    // No DACP (AirPlay 2 never sends it) but an event client is
+    // attached: send the MediaRemote command to the sender instead.
+    if (!dacp_is_active() && event_ctrl_available()) {
+      int ec = -1;
+      if (strcmp(payload, "play") == 0) {
+        ec = EVENT_CMD_PLAY;
+      } else if (strcmp(payload, "pause") == 0) {
+        ec = EVENT_CMD_PAUSE;
+      } else if (strcmp(payload, "play_pause") == 0) {
+        ec = EVENT_CMD_TOGGLE;
+      } else if (strcmp(payload, "next") == 0) {
+        ec = EVENT_CMD_NEXT;
+      } else if (strcmp(payload, "prev") == 0) {
+        ec = EVENT_CMD_PREV;
+      } else if (strcmp(payload, "stop") == 0) {
+        ec = EVENT_CMD_STOP;
+      }
+      if (ec >= 0) {
+        ESP_LOGI(TAG, "command %s via event channel: %s", payload,
+                 event_ctrl_queue(ec, false) ? "queued" : "refused");
+        return;
+      }
+    }
     if (strcmp(payload, "play_pause") == 0 || strcmp(payload, "play") == 0 ||
         strcmp(payload, "pause") == 0) {
       // DACP only exposes a toggle; play/pause act as toggle unless we are
@@ -615,6 +654,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id,
     topic(t, sizeof(t), "cmd");
     esp_mqtt_client_subscribe(s_client, t, 0);
     topic(t, sizeof(t), "volume/set");
+    esp_mqtt_client_subscribe(s_client, t, 0);
+    topic(t, sizeof(t), "cmd/exp_event");
     esp_mqtt_client_subscribe(s_client, t, 0);
     publish("status", "online", true);
     publish_discovery();
@@ -687,6 +728,7 @@ static void worker_task(void *arg) {
   uint32_t last_art = UINT32_MAX;
   int last_vol = -1;
   int64_t last_pub = 0;
+  bool last_ev = false;
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(500));
     if (s_restart) {
@@ -701,9 +743,11 @@ static void worker_task(void *arg) {
     bool playing = s_np.state == NP_STATE_PLAYING;
     int64_t now = esp_timer_get_time();
     bool periodic = playing && (now - last_pub) > NP_PROGRESS_SECS * 1000000LL;
-    if (!s_dirty && vol == last_vol && !periodic) {
+    bool ev = !dacp_is_active() && event_ctrl_available();
+    if (!s_dirty && vol == last_vol && !periodic && ev == last_ev) {
       continue;
     }
+    last_ev = ev;
     s_dirty = false;
     last_vol = vol;
     last_pub = now;

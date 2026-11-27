@@ -44,6 +44,12 @@ typedef struct {
   uint8_t encrypt_key[HAP_CHACHA20_KEY_SIZE];
   uint8_t decrypt_key[HAP_CHACHA20_KEY_SIZE];
 
+  // AirPlay 2 event channel keys (receiver side). write = the key this
+  // receiver encrypts with, read = the one it decrypts with.
+  uint8_t events_write_key[HAP_CHACHA20_KEY_SIZE];
+  uint8_t events_read_key[HAP_CHACHA20_KEY_SIZE];
+  bool events_keys_valid;
+
   // Encryption nonces (counters)
   uint64_t encrypt_nonce;
   uint64_t decrypt_nonce;
@@ -147,6 +153,15 @@ esp_err_t hap_encrypt(hap_session_t *session, const uint8_t *plaintext,
 esp_err_t hap_decrypt(hap_session_t *session, const uint8_t *ciphertext,
                       size_t ciphertext_len, uint8_t *plaintext,
                       size_t *plaintext_len);
+
+/* Derive the AirPlay 2 event-channel keys from the session secret
+ * (the whole SRP key for transient pairing, else the X25519 secret). The
+ * receiver writes with "Events-Write-Encryption-Key" and reads with
+ * "Events-Read-Encryption-Key" (shairport-sync pair_ap/pair_homekit.c,
+ * cipher_new() channel 4). swap = the legacy raw verify path, which also
+ * swaps the control keys. */
+void hap_derive_event_keys(hap_session_t *session, const uint8_t *ikm,
+                           size_t ikm_len, bool swap);
 
 /**
  * Derive audio encryption key from pair-verify shared secret

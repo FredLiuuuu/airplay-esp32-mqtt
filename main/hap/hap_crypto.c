@@ -57,6 +57,22 @@ int hap_hkdf_sha512(const uint8_t *salt, size_t salt_len, const uint8_t *ikm,
   return 0;
 }
 
+void hap_derive_event_keys(hap_session_t *session, const uint8_t *ikm,
+                           size_t ikm_len, bool swap) {
+  static const char salt[] = "Events-Salt";
+  static const char wr[] = "Events-Write-Encryption-Key";
+  static const char rd[] = "Events-Read-Encryption-Key";
+  hap_hkdf_sha512((const uint8_t *)salt, sizeof(salt) - 1, ikm, ikm_len,
+                  (const uint8_t *)(swap ? rd : wr),
+                  (swap ? sizeof(rd) : sizeof(wr)) - 1,
+                  session->events_write_key, 32);
+  hap_hkdf_sha512((const uint8_t *)salt, sizeof(salt) - 1, ikm, ikm_len,
+                  (const uint8_t *)(swap ? wr : rd),
+                  (swap ? sizeof(wr) : sizeof(rd)) - 1,
+                  session->events_read_key, 32);
+  session->events_keys_valid = true;
+}
+
 esp_err_t hap_derive_audio_key(hap_session_t *session, uint8_t *audio_key,
                                size_t key_len) {
   if (!session || !audio_key || key_len < 16) {

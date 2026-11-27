@@ -137,6 +137,7 @@ esp_err_t hap_pair_setup_m3(hap_session_t *session, const uint8_t *input,
     hap_hkdf_sha512((uint8_t *)"Control-Salt", 12, srp_key, srp_key_len,
                     (uint8_t *)"Control-Write-Encryption-Key", 28,
                     session->decrypt_key, 32);
+    hap_derive_event_keys(session, srp_key, srp_key_len, false);
     session->encrypt_nonce = 0;
     session->decrypt_nonce = 0;
     session->session_established = true;

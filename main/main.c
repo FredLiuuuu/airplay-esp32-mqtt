@@ -21,6 +21,7 @@
 #include "log_stream.h"
 #include "wifi.h"
 #include "mqtt_nowplaying.h"
+#include "event_ctrl.h"
 #include "spiffs_storage.h"
 
 #ifdef CONFIG_BT_A2DP_ENABLE
@@ -374,6 +375,7 @@ void app_main(void) {
   }
   ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(settings_init());
+  event_ctrl_init(); // Event-channel remote control
   mqtt_nowplaying_init();
 #ifdef CONFIG_DAC_TAS57XX
   // Load persisted sub level offset (pre-init safe; applied on first volume).

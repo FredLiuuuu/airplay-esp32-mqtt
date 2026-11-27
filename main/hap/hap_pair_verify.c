@@ -189,7 +189,8 @@ esp_err_t hap_pair_verify_m3(hap_session_t *session, const uint8_t *input,
                   HAP_X25519_KEY_SIZE,
                   (uint8_t *)"Control-Write-Encryption-Key", 28,
                   session->decrypt_key, 32);
-
+  hap_derive_event_keys(session, session->shared_secret, HAP_X25519_KEY_SIZE,
+                        false);
   tlv8_encoder_t enc;
   tlv8_encoder_init(&enc, output, output_capacity);
   tlv8_encode_byte(&enc, TLV_TYPE_STATE, PAIR_VERIFY_STATE_M4);
@@ -339,7 +340,8 @@ esp_err_t hap_pair_verify_m3_raw(hap_session_t *session, const uint8_t *input,
                   HAP_X25519_KEY_SIZE,
                   (uint8_t *)"Control-Write-Encryption-Key", 28,
                   session->encrypt_key, 32);
-
+  hap_derive_event_keys(session, session->shared_secret, HAP_X25519_KEY_SIZE,
+                        true);
   session->encrypt_nonce = 0;
   session->decrypt_nonce = 0;
 
