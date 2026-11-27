@@ -50,6 +50,8 @@ set( SRC_FILES
     "playback_events.c"
     "dacp_client.c"
     "mqtt_nowplaying.c"
+    "boot_guard.c"
+    "crash_log.c"
     "event_ctrl.c"
 )
 
@@ -184,3 +186,6 @@ if(CONFIG_USB_AUDIO_SINK AND CONFIG_USB_DEVICE_UAC_AS_PART)
         "${COMPONENT_DIR}/usb/usb_descriptors.c"
         "${COMPONENT_DIR}/usb/usb_hid_control.c")
 endif()
+
+# crash_log.c records the panic reason/backtrace before IDF's handler
+target_link_libraries(${COMPONENT_LIB} INTERFACE "-Wl,--wrap=esp_panic_handler")

@@ -10,6 +10,7 @@
  */
 
 #include "log_stream.h"
+#include "crash_log.h"
 #include "spiram_task.h"
 #include "web_server.h"
 
@@ -91,6 +92,7 @@ static int log_vprintf_hook(const char *fmt, va_list args) {
     if ((size_t)len >= sizeof(buf)) {
       len = sizeof(buf) - 1;
     }
+    crash_log_append(buf, (size_t)len); /* Survives a reset */
     if (xSemaphoreTake(s_mutex, 0) == pdTRUE) {
       ring_write(buf, (size_t)len);
       xSemaphoreGive(s_mutex);

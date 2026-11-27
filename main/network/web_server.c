@@ -33,6 +33,7 @@
 #include "esp_app_desc.h"
 #include "esp_timer.h"
 #include "mqtt_nowplaying.h"
+#include "crash_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -1441,6 +1442,14 @@ static esp_err_t system_info_handler(httpd_req_t *req) {
   cJSON_AddStringToObject(info, "firmware_version", app_desc->version);
   cJSON_AddStringToObject(info, "reset_reason",
                           reset_reason_str(esp_reset_reason()));
+  { // A log from the previous boot is at /api/system/crashlog
+    bool crash = false;
+    const char *why = "";
+    bool have = crash_log_present(&crash, &why);
+    cJSON_AddBoolToObject(info, "crashlog", have);
+    cJSON_AddBoolToObject(info, "crashlog_crash", have && crash);
+    cJSON_AddStringToObject(info, "crashlog_reason", have ? why : "");
+  }
   const int64_t uptime_s = esp_timer_get_time() / 1000000;
   cJSON_AddNumberToObject(info, "uptime_s", (double)uptime_s);
 #ifdef HAS_BQ_API
@@ -3292,6 +3301,7 @@ esp_err_t web_server_start(uint16_t port) {
   config.max_uri_handlers += 11; // tuning page + HF1/HF3 get/post/commit/revert
 #endif
   config.max_uri_handlers += MQTT_NOWPLAYING_URI_HANDLERS;
+  config.max_uri_handlers += 1; // /api/system/crashlog
   config.max_resp_headers = 8;
 #ifdef CONFIG_SENDSPIN_OPUS
   /* libopus keeps its CELT scratch on the stack: measured peak is 11.7 KB at
@@ -3641,6 +3651,10 @@ esp_err_t web_server_start(uint16_t port) {
 #endif
 
   mqtt_nowplaying_register_http(s_server);
+  httpd_uri_t crashlog_uri = {.uri = "/api/system/crashlog",
+                              .method = HTTP_GET,
+                              .handler = crash_log_http_handler};
+  register_uri(&crashlog_uri);
   log_stream_register(s_server);
 #ifdef CONFIG_SENDSPIN_ENABLE
   // Returns ESP_ERR_INVALID_STATE when sendspin_init() was skipped, which is

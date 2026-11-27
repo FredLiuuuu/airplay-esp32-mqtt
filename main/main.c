@@ -21,6 +21,8 @@
 #include "log_stream.h"
 #include "wifi.h"
 #include "mqtt_nowplaying.h"
+#include "boot_guard.h"
+#include "crash_log.h"
 #include "event_ctrl.h"
 #include "spiffs_storage.h"
 
@@ -365,6 +367,8 @@ static void on_playback_event(playback_source_t source, playback_event_t event,
 
 void app_main(void) {
   ESP_LOGW(TAG, "Boot: reset reason %d", (int)esp_reset_reason());
+  crash_log_init();   // Keep the previous boot's log (RTC RAM)
+  boot_guard_check(); // Fall back to the other OTA slot on a crash loop
 
   // Initialize NVS
   esp_err_t ret = nvs_flash_init();
@@ -535,6 +539,7 @@ void app_main(void) {
 #endif
   web_server_start(80);
   mqtt_nowplaying_start();
+  boot_guard_start_stable_timer();
   task_create_spiram(network_monitor_task, "net_mon", 4096, NULL, 5, NULL,
                      NULL);
   log_dram("web server");

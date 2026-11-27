@@ -33,6 +33,7 @@
 #include "dacp_client.h"
 #include "event_ctrl.h"
 #include "playback_control.h"
+#include "boot_guard.h"
 #include "playback_events.h"
 #include "settings.h"
 #include "spiram_task.h"
@@ -380,8 +381,10 @@ static char *build_state_json(void) {
   cJSON_AddNumberToObject(j, "volume_level", vol / 100.0);
   cJSON_AddBoolToObject(j, "muted", playback_control_is_muted());
   cJSON_AddBoolToObject(j, "dacp", dacp_is_active());
-  // Diagnostic: did the sender send DACP-ID/Active-Remote at all.
+  // Diagnostics: did the sender send DACP-ID/Active-Remote at all, and
+  // how many crash boots the boot guard has counted.
   cJSON_AddBoolToObject(j, "dacp_id_seen", dacp_has_id());
+  cJSON_AddNumberToObject(j, "boot_crashes", (double)boot_guard_crash_count());
   // True when the box can control its sender over the AirPlay 2
   // event channel (no DACP needed). Commands on cmd then reach the sender.
   cJSON_AddBoolToObject(j, "event_ctrl",
