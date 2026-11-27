@@ -1,9 +1,58 @@
 # airplay-esp32-mqtt
 
+**A ~$10 ESP32-S3 board that joins your HomePods as a real AirPlay 2
+multi-room speaker, and shows up in Home Assistant by itself.**
+
 A fork of [rbouteiller/airplay-esp32](https://github.com/rbouteiller/airplay-esp32)
-(ESP32 AirPlay 2 receiver) that adds **MQTT now-playing with Home Assistant
-discovery**, cover art, remote control back to the sender, and a few
-robustness features.
+(the ESP32 AirPlay 2 receiver) with MQTT now-playing, Home Assistant
+discovery, cover art and remote control back to the sender.
+
+## Why this firmware
+
+- **Real AirPlay 2 multi-room on a microcontroller.** Group it with HomePods
+  in the Home app or Control Center and it plays in sync. Upstream does the
+  AirPlay 2 work; this fork keeps all of it.
+- **Appears in Home Assistant automatically.** With MQTT discovery you get one
+  device, with title, artist, album, play state, position, duration and cover
+  art, with no YAML to write. This also works when the receiver is grouped and
+  the stream comes from an Apple TV or home hub, not from the phone.
+- **Control from HA:** Play/Pause, Next and Previous buttons, plus a volume
+  slider.
+- **Controls the sender, not just itself.** Pause or Next in HA pauses or skips
+  the actual iPhone or Apple TV session. It uses the AirPlay 2 event channel, so
+  it needs no DACP-ID and no MRP pairing.
+- **Recovers on its own.** A crash log survives a reset, a boot guard rolls back
+  to the previous OTA slot after a crash loop, and `/api/system/info` reports
+  the last crash.
+- **Costs nothing when off.** MQTT is disabled by default, and no broker,
+  credentials or hostnames are compiled in.
+
+> TODO: screenshot of the Home Assistant device card (to add with a neutral
+> device name).
+
+### How it compares
+
+Checked against each project's own docs and code on 2026-11-27. "Not built in"
+means the feature is not in the project itself; it may be possible with add-ons,
+scripts or another integration.
+
+| | **airplay-esp32-mqtt** | [airplay-esp32](https://github.com/rbouteiller/airplay-esp32) v0.3.0 | [Shairport Sync](https://github.com/mikebrady/shairport-sync) 5.6 on a Raspberry Pi | [squeezelite-esp32](https://github.com/sle118/squeezelite-esp32) | Typical commercial AirPlay boards |
+|---|---|---|---|---|---|
+| Hardware | ESP32-S3 + I2S DAC | ESP32 / S2 / S3 / C5 | Linux computer (Raspberry Pi B or better) | ESP32 / ESP32-S3 | Vendor module |
+| AirPlay 2 multi-room with HomePods | Yes (from upstream) | Yes | Yes (AirPlay 2 build, with documented limitations) | No, AirPlay 1 only | Usually yes |
+| MQTT now-playing | Yes | Not built in | Yes (`--with-mqtt-client`) | Not built in | Varies by vendor; usually an app or HTTP API |
+| Home Assistant auto-discovery | Yes: sensors, image, buttons, volume number | Not built in | Yes: sensors and binary sensors | Not built in | Varies; some have HA integrations |
+| Cover art in HA | Yes, MQTT `image` entity (served from PSRAM) | Not built in (used for displays) | Published as binary on MQTT; not part of discovery | Not built in | Varies |
+| Remote control of the AirPlay 2 sender | Yes, event channel | In `staging` (PR #226), not yet released | Yes (MQTT `remote` topic) | AirPlay 1 only | Varies |
+| Crash log / auto-rollback | Yes | Not built in | n/a (Linux service) | Not built in | Closed firmware |
+| Open source | GPL-3.0-or-later | GPL-3.0-or-later | Yes (see its LICENSES file) | Yes (see its repo for licenses) | Usually closed |
+
+Where this fork fits: Shairport Sync already does MQTT, HA discovery and
+remote control very well, but needs a Linux computer. Upstream airplay-esp32
+gets AirPlay 2 onto a $10 microcontroller, but has no Home Assistant side. This
+fork does both on the microcontroller.
+
+## Project facts
 
 - Based on upstream tag **v0.3.0** (ESP-IDF **6.1**). The upstream history is
   kept, so `git log v0.3.0..` shows exactly what this fork adds.
@@ -14,10 +63,12 @@ robustness features.
   [README.upstream.md](README.upstream.md), and the upstream documentation
   site applies: <https://rbouteiller.github.io/airplay-esp32/>.
 
-> **Status:** tested on one generic ESP32-S3-WROOM-1 board (16 MB flash, 8 MB
-> octal PSRAM, I2S DAC), with iPhone and Apple TV/HomePod-style multi-room
-> groups as senders. Other boards should work wherever upstream works, but
-> have not been tested. MQTT is **off by default**.
+> **Tested hardware:** one generic ESP32-S3-WROOM-1 board (16 MB flash, 8 MB
+> octal PSRAM, I2S DAC). Senders tested: an iPhone playing directly, an iPhone
+> group with a HomePod, and an Apple home-hub group with two HomePods. Other
+> boards should work wherever upstream works, but have not been tested.
+> Release builds are produced by CI; see each release's notes for whether that
+> exact build has run on hardware.
 
 ## What it adds
 
