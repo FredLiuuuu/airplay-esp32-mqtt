@@ -387,6 +387,16 @@ static cJSON *state_sensor(const char *tmpl, const char *icon) {
   return c;
 }
 
+static cJSON *button(const char *payload, const char *icon) {
+  char cmd[NP_TOPIC_MAX];
+  topic(cmd, sizeof(cmd), "cmd");
+  cJSON *c = cJSON_CreateObject();
+  cJSON_AddStringToObject(c, "command_topic", cmd);
+  cJSON_AddStringToObject(c, "payload_press", payload);
+  cJSON_AddStringToObject(c, "icon", icon);
+  return c;
+}
+
 static void publish_discovery(void) {
   cJSON *c;
 
@@ -414,19 +424,107 @@ static void publish_discovery(void) {
   cJSON_AddStringToObject(c, "device_class", "duration");
   discovery("sensor", "duration", "Duration", c);
 
-  discovery("sensor", "volume", "Volume",
-            state_sensor("{{ value_json.volume }}", "mdi:volume-high"));
+  // Volume as a number entity: state from JSON, set via volume/set (0..100).
+  {
+    char st[NP_TOPIC_MAX], cmd[NP_TOPIC_MAX];
+    topic(st, sizeof(st), "state");
+    topic(cmd, sizeof(cmd), "volume/set");
+    c = cJSON_CreateObject();
+    cJSON_AddStringToObject(c, "state_topic", st);
+    cJSON_AddStringToObject(c, "value_template", "{{ value_json.volume }}");
+    cJSON_AddStringToObject(c, "command_topic", cmd);
+    cJSON_AddNumberToObject(c, "min", 0);
+    cJSON_AddNumberToObject(c, "max", 100);
+    cJSON_AddNumberToObject(c, "step", 1);
+    cJSON_AddStringToObject(c, "mode", "slider");
+    cJSON_AddStringToObject(c, "unit_of_measurement", "%");
+    cJSON_AddStringToObject(c, "icon", "mdi:volume-high");
+    discovery("number", "volume", "Volume", c);
+  }
+
+  discovery("button", "play_pause", "Play/Pause",
+            button("play_pause", "mdi:play-pause"));
+  discovery("button", "next", "Next", button("next", "mdi:skip-next"));
+  discovery("button", "prev", "Previous",
+            button("prev", "mdi:skip-previous"));
+}
+
+static void handle_command(const char *t, int tlen, const char *d, int dlen) {
+  char suffix[24] = {0};
+  size_t blen = strlen(s_cfg.base);
+  if (tlen <= (int)blen + 1 || strncmp(t, s_cfg.base, blen) != 0) {
+    return;
+  }
+  int slen = tlen - (int)blen - 1;
+  if (slen >= (int)sizeof(suffix)) {
+    return;
+  }
+  memcpy(suffix, t + blen + 1, slen);
+  char payload[24] = {0};
+  if (dlen >= (int)sizeof(payload)) {
+    dlen = sizeof(payload) - 1;
+  }
+  memcpy(payload, d, dlen);
+
+  if (strcmp(suffix, "cmd") == 0) {
+    ESP_LOGI(TAG, "command: %s", payload);
+    if (strcmp(payload, "play_pause") == 0 || strcmp(payload, "play") == 0 ||
+        strcmp(payload, "pause") == 0) {
+      // DACP only exposes a toggle; play/pause act as toggle unless we are
+      // already in the requested state.
+      np_play_state_t cur = s_np.state;
+      if ((strcmp(payload, "play") == 0 && cur == NP_STATE_PLAYING) ||
+          (strcmp(payload, "pause") == 0 && cur != NP_STATE_PLAYING)) {
+        return;
+      }
+      playback_control_play_pause();
+    } else if (strcmp(payload, "next") == 0) {
+      playback_control_next();
+    } else if (strcmp(payload, "prev") == 0) {
+      playback_control_prev();
+    } else if (strcmp(payload, "volume_up") == 0) {
+      playback_control_volume_up();
+    } else if (strcmp(payload, "volume_down") == 0) {
+      playback_control_volume_down();
+    }
+  } else if (strcmp(suffix, "volume/set") == 0) {
+    float v = strtof(payload, NULL);
+    if (v < 0) {
+      v = 0;
+    } else if (v > 100) {
+      v = 100;
+    }
+    ESP_LOGI(TAG, "volume set %.0f%%", v);
+    if (dacp_is_active()) {
+      // The sender owns the level and echoes it back; don't fight it.
+      ESP_LOGI(TAG, "volume set via DACP");
+      dacp_send_volume(v);
+    } else {
+      // No DACP (idle box, or a grouped stream without it): apply locally,
+      // as the buttons do - settings level (DAC) plus the AirPlay session
+      // level that scales samples on this PCM5102. Not persisted per step;
+      // playback_control commits it at pause/session end.
+      ESP_LOGI(TAG, "volume set locally (no DACP)");
+      playback_control_set_volume_db(-30.0f + (v / 100.0f) * 30.0f);
+    }
+    s_dirty = true;
+  }
 }
 
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id,
                                void *event_data) {
   (void)arg;
   (void)base;
-  (void)event_data;
+  esp_mqtt_event_handle_t ev = event_data;
   switch ((esp_mqtt_event_id_t)id) {
   case MQTT_EVENT_CONNECTED: {
     ESP_LOGI(TAG, "connected to %s:%u", s_cfg.host, s_cfg.port);
     s_mqtt_connected = true;
+    char t[NP_TOPIC_MAX];
+    topic(t, sizeof(t), "cmd");
+    esp_mqtt_client_subscribe(s_client, t, 0);
+    topic(t, sizeof(t), "volume/set");
+    esp_mqtt_client_subscribe(s_client, t, 0);
     publish("status", "online", true);
     publish_discovery();
     s_dirty = true;
@@ -434,6 +532,11 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id,
   }
   case MQTT_EVENT_DISCONNECTED:
     s_mqtt_connected = false;
+    break;
+  case MQTT_EVENT_DATA:
+    if (ev->current_data_offset == 0 && ev->total_data_len == ev->data_len) {
+      handle_command(ev->topic, ev->topic_len, ev->data, ev->data_len);
+    }
     break;
   default:
     break;

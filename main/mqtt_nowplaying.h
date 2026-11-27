@@ -4,7 +4,8 @@
  *
  * Publishes AirPlay now-playing state (title/artist/album/genre, play state,
  * volume, progress) to an MQTT broker, with Home Assistant MQTT
- * discovery.
+ * discovery, and accepts play/pause/next/prev/volume commands that are
+ * forwarded to the sender through the existing DACP client.
  *
  * Broker host/port/user/password live in NVS (namespace "mqtt_np") and are
  * set at runtime through GET/POST /api/mqtt.  Nothing is compiled in.
